@@ -1,0 +1,44 @@
+---
+title: "NEH Grants Project"
+author: "D Conner"
+date: "11/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages, Scripts & Data 
+```{r}
+#packages prep
+if(! require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  here,
+  readr
+)
+```
+```{r}
+# load script for data import
+source(here::here("Scripts", "load_data.R"))
+
+# load analysis functions
+# source(here::here("Scripts", "functions.R"))  # placeholder
+```
+```{r}
+# create list of file names
+files <- list.files(here::here("Data"), pattern = "\\.csv", full.names = T)
+
+# import file data
+grants_df <- map_df(files, ~read_data(.))
+
+glimpse(grants_df)   # use head() for presentation display
+```
+All 33 columns are aligned and properly detected.
+
+Data cleaning will include some incorrect dates (e.g. 1900), extraction of first 5 digits of postcode. If relevant, the Supplements field may be updated to  extract amount and date, as well as to replace explicit nulls with NA. These will be added to data loading script.
+
+
+
