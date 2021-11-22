@@ -1,13 +1,43 @@
 ---
 title: "NEH Grants Project"
 author: "D Conner"
-date: "11/15/2021"
-output: html_document
+date: "11/22/2021"
+output: 
+   html_document:
+    theme: yeti 
+    highlight: textmate
+    toc: TRUE
+    toc_float: TRUE
+    df_print: paged
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+# Introduction
+## About the Data
+The data set is grant data from the US National Endowment for the Humanities (NEH). Data were downloaded 10/16/2021 [1] as CSV files for each decade from the 1960s through the 2020s, and according to the info page last updated 8/3/2020. [2] The latter site also includes a data dictionary, NEH_GrantsDictionary, and a contextual reference for the NEH's larger structure and programs, NEH_GrantsReference.
+
+According to the reference document, the NEH was founded by an act of Congress in 1965. They grant funding to organizations and individuals to support research, education, and preservation concerning the humanities, particularly  American history and culture as a diverse and living collection of fields.
+
+[1] https://catalog.data.gov/organization/neh-gov      <br />
+[2] https://securegrants.neh.gov/open/data/
+
+
+## Primary question 
+Who are grants awarded to and in what fields? How do award amounts compare to amounts dispensed, and what factors might impact this result?
+
+## Analysis Approach
+Concatenate data for the duration of the program, 1966-2021. 
+
+Summarize organization type, award amounts, and disciplines over time and create a suitable visualization. 
+
+Show overall distribution of award amounts by decade. Compare award authorization (outright + match) to amount dispensed (outright + match + supplement). This is possibly best evaluated as percent of initial authorization due to wide range of dollar amounts. 
+
+What percent of awards are on, below, and above initial authorization? Do these ratios change over time? What are the roles of matching and supplemenatal funds, and do they trend with other data within the table? 
+
+Communicate results of these explorations with suitable visualizations.
+
 
 ## Load Packages, Scripts & Data 
 ```{r}
@@ -17,15 +47,16 @@ if(! require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse,
   here,
-  readr
+  readr,
+  lubridate
 )
 ```
 ```{r}
-# load script for data import
+# load script for data import & cleaning
 source(here::here("Scripts", "load_data.R"))
 
 # load analysis functions
-# source(here::here("Scripts", "functions.R"))  # placeholder
+source(here::here("Scripts", "functions.R"))  # placeholder
 ```
 ```{r}
 # create list of file names
@@ -36,9 +67,542 @@ grants_df <- map_df(files, ~read_data(.))
 
 glimpse(grants_df)   # use head() for presentation display
 ```
-All 33 columns are aligned and properly detected.
+All 33 columns are aligned and most are properly detected. Dates and map coordiantes are read as characters to silence a read parsing error due to format. These will be converted to proper format in the data cleaning procedure. Two persistent warnings for parsing issues remain, but `problems()` yields a blank result. This is sufficient to proceed.
 
-Data cleaning will include some incorrect dates (e.g. 1900), extraction of first 5 digits of postcode. If relevant, the Supplements field may be updated to  extract amount and date, as well as to replace explicit nulls with NA. These will be added to data loading script.
+# Data cleaning 
+Data cleaning steps were conducted to include correction of "no data"-type entries to functional `NA`s, extraction of first 5 digits of postcode, and coercion of correct data types for Latitude, Longitide, and CouncilDate.
+```{r}
+# data cleaning
+
+grants_df_clean <-
+grants_df %>%
+   # replace functional NAs with uniform NAs
+   mutate(ProjectDesc = str_replace(ProjectDesc, "No description", NA_character_)) %>%
+   mutate(Supplements = str_replace(Supplements, "NULL", NA_character_)) %>%
+   mutate(Disciplines = str_replace(Disciplines, "[Uu]nknown", NA_character_)) %>%
+   mutate(Latitude = str_replace(Latitude, "[Uu]nknown", NA_character_)) %>%
+   mutate(Longitude = str_replace(Longitude, "[Uu]nknown", NA_character_)) %>%
+   mutate(ProjectDesc = str_replace(ProjectDesc, "No description", NA_character_)) %>%
+   mutate(ToSupport = str_replace(ToSupport, "No to support statement", NA_character_)) %>%
+   mutate(ProjectTitle = str_replace(ProjectTitle, "Title not available", NA_character_)) %>%
+   mutate(CouncilDate = str_replace(CouncilDate, "1/1/1900", NA_character_)) %>%
+   mutate(CouncilDate = str_replace(CouncilDate, "1900-01-01", NA_character_)) %>%
+
+   
+   # clean post codes: mixed 5-digit and 9-digit to first-5 digits
+   # shortest ZIP codes are 3 digits without leading 0s
+   mutate(InstZIP5 = str_extract(InstPostalCode, "\\d{3,5}")) %>%
+   # clean post codes: pad out 3 & 4 digit codes to 5-digit standard
+   mutate(InstZIP5 = str_pad(InstZIP5, 5, side = "left", "0")) %>%
+   # clean post codes: change 00000 to NA
+   mutate(InstZIP5 = str_replace(InstZIP5, "0{5}", NA_character_)) %>%
+
+   # correct field classes
+   mutate(Latitude = as.double(Latitude),
+          Longitude = as.double(Longitude),
+          CouncilDate = as.Date(CouncilDate, "%m/%d/%y"),
+          BeginGrant = as.Date(BeginGrant, "%m/%d/%y"),
+          EndGrant = as.Date(EndGrant, "%m/%d/%y"))
+```
 
 
 
+# Initial data characterization
+The initial look at data incudes a `glimpse` of content & quick view of the data summary. 
+```{r}
+glimpse(grants_df_clean)
+
+summary(grants_df_clean)
+```
+Based on these data, we can already start to see how we may need to look at the data. A typical award amount of \$20,000 but maximum of \$8.7 million strongly suggests that award amounts will be best plotted on a log scale and analyzed as a proportion of the original approved amount.
+
+This summary also indicates that YearAwarded will be the most useful as a time axis. Additional date fields CouncilDate, BeginGrant, and EndGrant are all clearly missing data. 
+
+The `peek_NEH` custom function summarizes column and data type as well as the number of distinct values, NA, and entries with the value "unknown".
+```{r}
+grants_df_clean %>%
+    map_dfr(peek_NEH,
+           .id = "field")
+```
+Some columns have a expectedly large or small number of distinct values. For example, AppNumber is unique for all entries while ParticipantCount reflects the limited number of official recipient agency contacts even in large collaborations. 
+
+Some columns have large numbers of NA or unknown data. For this analysis, missing values in institution name or map coordinates are unlikely to impact an analysis of grant amounts, but missing 23% of the data in most of the date fields  reinforces the decision to use YearAwarded (which has complete data) as the time axis.
+
+Histograms might also be helpful to understand the shape of the data. The `create_hist` and `create_hist_log` functions plot histograms of the input list of fields on a linear or log axis, respectively.
+```{r}
+# create lists of numeric fields
+date_fields <- 
+       c("CouncilDate", "YearAwarded")
+
+money_fields <- 
+    c("ApprovedOutright", "ApprovedMatching", "OriginalAmount", "SupplementAmount")
+```
+```{r}
+# map histogram function to date fields related to award approval/start
+map(date_fields, 
+    ~ create_hist(grants_df_clean , .x)
+    )
+```
+The YearAwarded data show a rapid initial rise in number of grants awarded through the late 1970s. The peak of grant activity was largely maintained through the late 1980s and early 1990s, followed by a steep dropoff in the late 1990s. Grant activity recovered inthe early 2000s only to slowly fall again to the present. The most recent year, 2021, is particularly low due to incomplete data.
+
+According to the data dictionary, some grants of the unknown CouncilDate may be Chairman's Grants which are awarded by the chairman outside of the regular granting cycle and without a council review. However, this is most pertinent to data after 1971 when CouncilDate started to be included in the data record.
+
+```{r}
+# map histogram function to award amount-related fields w log scale
+map(money_fields, 
+    ~ create_hist_log(grants_df_clean , .x)
+    )
+```
+
+As anticipated, grant amounts are spread quite widely.It appears most common for the final OriginalAmount to be approx. \$20,000 to \$80,000, with a broader range and more numerous awards of smaller amounts than larger amounts. However, where a grantee successfully applies for a supplement, the most likely amounts are either \$1000 or \$1 million with few awards between them.
+
+## Aside: What's up with the Invalid ZIP Codes?
+After cleaning to extract 5-digit ZIP Codes, there are 855 NA values. However, in the data peek at the as-is InstPostalCode column we saw 1 NA and 603 Unknown. What are the rest?
+```{r}
+grants_df_clean %>%
+   filter(is.na(InstZIP5)) %>%
+   filter(!InstPostalCode == "Unknown") %>%
+   select(AppNumber, YearAwarded, InstPostalCode, InstCountry, InstZIP5)
+```
+Removing the Unknown Postcodes, we see two reasons for NA results. The data cleaning routine pulls 3-5 consecutive numeric digits and left-pads 0s to ensure a 5-digit final result consistent with US postal codes. Some codes with no data were entered as 0s, which were also cleaned to NA. Finally, foreign alphanumeric postcodes would not be detected by this routine. The presence of foreign postcodes is also hinted at by the 41 entries for country and 58 for states.
+
+As a quick aside, how many and where are the foreign grants going?
+```{r}
+grants_df_clean %>%
+   filter(is.na(InstZIP5)) %>%
+   filter(!InstCountry == "Unknown",
+          !InstCountry == "USA") %>%
+   group_by(InstCountry) %>%
+   summarise(count = n(), sum(OriginalAmount))  %>%
+   arrange(desc(count)) %>%
+   ungroup()
+```
+So, of the 67,153 grants in this data set, 177 have been granted to foreign institutions, primarily in Canada and the UK, totaling approx. \$6.5 million over the 65 years of the program. This represents a tiny portion of the total grants disbursed in both number and fiscal outlay, so while a lovely aside, we'll focus on the main data for awards in the US. It may be necessary to filter data to ensure US-only analysis.
+
+# Grant Analysis Part 1: Distribution over time
+
+## Setup: Calculations
+First, we need to add some additional calculated data columns to ensure we can do the desired comparisons quickly. The resulting dataframe is renamed to a new object, grants_df_calcs.
+```{r}
+grants_df_calcs <-
+ grants_df_clean %>%
+   
+   # sum total approved amount
+   mutate(ApprovedInit = ApprovedOutright + ApprovedMatching)  %>%
+   
+   # sum final total disbursed
+   mutate(AwardTotal = OriginalAmount + SupplementAmount) %>%
+
+   # Add cols for Award % of init approved amount
+   mutate(AwardOriginal_pct = 100 * AwardTotal / ApprovedInit) %>%
+   mutate(AwardTotal_pct = 100 * AwardTotal / ApprovedInit) %>%
+   mutate(Suppl_pct = 100 * SupplementAmount / ApprovedInit) %>%
+
+   # Add col for decade for addl time grouping
+   mutate(Decade = case_when(
+                     YearAwarded >= 1960 & YearAwarded <= 1969 ~ "1960-1969",
+                     YearAwarded >= 1970 & YearAwarded <= 1979 ~ "1970-1979",
+                     YearAwarded >= 1980 & YearAwarded <= 1989 ~ "1980-1989",
+                     YearAwarded >= 1990 & YearAwarded <= 1999 ~ "1990-1999",
+                     YearAwarded >= 2000 & YearAwarded <= 2009 ~ "2000-2009",
+                     YearAwarded >= 2010 & YearAwarded <= 2019 ~ "2010-2019",
+                     YearAwarded >= 2020 & YearAwarded <= 2029 ~ "2020-2029"
+                     )  
+         ) %>%
+   
+      # Add logical eval around matching grants
+   mutate(MatchReqd = case_when(
+                     ApprovedMatching > 0 ~ TRUE,
+                     ApprovedMatching <= 0 ~ FALSE)  
+         ) %>%
+
+      mutate(MatchMet = case_when(
+                     MatchReqd == FALSE ~ NA,
+                     MatchReqd == T & AwardMatching >= ApprovedMatching ~ TRUE,
+                     MatchReqd == T & AwardMatching < ApprovedMatching ~ FALSE
+                     )
+         )
+```
+
+## First look at grants over time
+To build on the histogram showing YearAwarded above (reproduced here for reference), looking at total award amount of grants by decade should give us some insight into trends in award over time.
+```{r}
+create_hist(grants_df_calcs, "YearAwarded")
+
+create_hist_log_facet(grants_df_calcs, "AwardTotal", "Decade")
+
+```
+Indeed, each decade of grant award amounts looks distinct. In the 1960s, awards were few and small, which is understandable for a fledgling grant program. The 1970s and 1980s saw high activity and a broad range of grant amounts, from \$1000 to over \$1 million. The 1990s show similar distribution of amounts but reduced overall number of awards. The 2000s to the present show a trend for further decrease in number of awards with increasing award amounts. 
+
+Examining data by decades flattens the effect of financial crises, which usually last for at most 1-2 years. The trend of decreasing number of awards and tendency away from smaller grants - intuitively more likely to go to individual scholars and artists - reflect the politicization of the budget of the NEH since the mid-1990s, along with other agencies charged with funding arts and culture.
+```{r}
+decade_count_amt <- 
+grants_df_calcs %>%
+   group_by(Decade) %>%
+   summarise(count = n(), "Total Awarded" = sum(AwardTotal), "Avg Award" = mean(AwardTotal), "Median Award" = median(AwardTotal)) %>%
+   arrange(Decade) %>%
+   ungroup()
+
+decade_count_amt
+```
+```{r}
+decade_count_amt %>%
+   create_barplot("Avg Award", "Decade", "Mean Award, USD")
+```
+
+Calculating the total number of grants and total amount awarded by decade confirms the interpretation of the histogram. The total number of grants peaked in the 1980s. While the amount disbursed each decade has remained similar for the 1990s to the 2010s, the number of recipients has decreased and the mean awarded amount has shifted sharply upward from the 1980s to today. This is very clear in a barplot of the mean grant amount. This trend is also reflected in the increase in the median grant award, and that the mean is 2-3 times the median.
+
+
+# Grant Analysis Part 2: Who gets it?
+## Who are grant recipients
+Summarizing the OrganizationType and ranking by count, we can start to characterize what types of groups NEH grants go to.
+```{r}
+grants_df_calcs %>%
+   group_by(OrganizationType) %>%
+   summarise(count = n()) %>%
+   arrange(desc(count)) %>%
+   ungroup()
+```
+The vast majority of NEH grants go to colleges, universities, and research institutions. 
+
+About 15% of the grants list the recipient organization type as unknown. The first check is whether these were individual awards rather than organizational. 
+```{r}
+grants_df_calcs %>%
+   filter(OrganizationType == "Unknown") %>%
+   group_by(Decade, ApplicantType) %>%
+   summarise(count = n()) %>%
+   arrange(desc(count)) %>%
+   ungroup()
+```
+The vast majority of the "Unknown" Organization Types - 93% - are of Type 2, which corresponds to individual grants. The only periods in which the values for the two applicant types are similar is the 1960s and 2020s. As noted above, data in general has more missing values during the earliest era of the NEH grant program. The 2020s have the fewest grants to date, but also the least missing data. A decreasing trend for Unknown organization type over time also likely is related to implementation of automated data collection as part of the application process that is less tolerant of omissions.
+
+```{r}
+grants_df_calcs %>%
+   mutate(AppTotal = length(ApplicantType)) %>%
+   group_by(ApplicantType, AppTotal) %>%
+   summarise(TypeCount = n() ) %>%
+   mutate(TypePercent = 100 * TypeCount / AppTotal) %>%
+   arrange(desc(TypeCount)) %>%
+   ungroup()
+```
+Overall, 59.5% of grants are awarded to organizations and 40.5% to individuals. Are there differences int he grant amounts between the two applicant types?
+
+```{r}
+create_hist_log_facet(grants_df_calcs, "AwardTotal", "ApplicantType")
+```
+Plotting award amount separated by ApplicantType shows drastic differences in the distributions. For type 1, organizations, the distribution is close to normal with a slight leftward skew toward lower award amounts vs higher and a range from \$500 to \$5 million. For type 2, individuals, the distribution is narrow and bimodal with peaks around \$2,000 and \$30,000.Individual grants also have a sharp drop-off at amounts  over \$70,000.
+
+Revisiting the initial look at how the overall award amount distribution shifted over time: Has the distribution of grants to each applicant type changed over time?
+```{r}
+# Organizations
+grants_df_calcs %>%
+   filter(ApplicantType == "1") %>%
+   create_hist_log_facet("AwardTotal", "Decade")
+
+# Individuals
+grants_df_calcs %>%
+   filter(ApplicantType == "2") %>%
+   create_hist_log_facet("AwardTotal", "Decade")
+```
+For individual grantees, the primary change over time has been a decrease in total awards granted with distribution and amounts remaining largely similar. 
+
+The plots for organizational grants show a significant shift in distribution over time. From the 1960s through 1990s, the distribution shape is relatively normal with the mean shifting slightly upwards each decade. The 2000s show instead overlapping trends for a) an upward and normal distribution of large grants and b) an emerging cohort of small grants giving a leftward skew to the distribution as a whole. 
+
+
+## Location, location, location!
+First, let's look at the number of grants awarded by state. There are 58 state codes entered (inclusive of US territories and foreign jurisdictions), but let's focus on the 10 each that get the most and least.
+```{r}
+# Most grants received
+grants_df_calcs %>%
+   group_by(InstState) %>%
+   summarize(NState = length(InstState)) %>%
+   ungroup() %>%
+   slice_max(NState, n = 10) %>%
+   create_barplot("NState", "InstState", xlabel = "No. Grants")
+
+# Fewest grants received
+grants_df_calcs %>%
+   group_by(InstState) %>%
+   summarize(NState = length(InstState)) %>%
+   ungroup() %>%
+   slice_min(NState, n = 10) %>%
+   create_barplot("NState", "InstState", xlabel = "No. Grants")
+```
+By far, New York and California get the largest number of grants. These are the two of the most populous states with an enormous number of higher education and cultural institutions, so this result makes sense. Washington, DC, is not a state but among the most awarded, likely because the national capitol is a center of cultural research and preservation projects.
+
+The jurisdictions recieving the fewest awards are US territories and low-population states in the western plains of the US.  These areas may be deprioritized because of low population, low number of organizations supporting applicants, and in the case of US territories separation from the mainland and perception as "Not American". 
+
+```{r}
+# Most grants received
+grants_df_calcs %>%
+   group_by(InstState) %>%
+   summarize(AwardSum = sum(AwardTotal)) %>%
+   ungroup() %>%
+   slice_max(AwardSum, n = 10) %>%
+   create_barplot("AwardSum", "InstState", xlabel = "Sum Awarded 1965-2021")
+
+# Fewest grants received
+grants_df_calcs %>%
+   group_by(InstState) %>%
+   summarize(AwardSum = sum(AwardTotal)) %>%
+   ungroup() %>%
+   slice_min(AwardSum, n = 10) %>%
+   create_barplot("AwardSum", "InstState", xlabel = "Sum Awarded 1965-2021")
+```
+Repeating the analysis by the total grant amount awarded by jurisdiction, the trend is similar as for number of grants. New York, California, and Massachusetts are the top three awardees. Nine states rank in the top 10 in both award number and award amount; North Carolina receives more grants, but Maryland receives more funds. 
+
+For the lowest funding amounts, again 6 terriroties and foreign jurisdictions are among these, as well as 4 states in the western plains region. Two jurisdictions are different between the plots for number of grants and award totals. With respect to grants to terriroties and foreign institutions, Puerto Rico receives 8th fewest grant awards, but receives enough funding to escape the bottom 10. The combined foreign jurisdictions with state "Unknown" receive more grants, but total the 6th least funding, only surpassing smaller and more distant territories. Looking at US states, North Dakota has 9th fewest awards, but receives enough funding to surpass Idaho.
+
+# Grant Analysis Part 3: How much are we talking?
+
+## Award as percent Original Approval
+Plotting a histogram of AwardOriginal_pct, we see that the scae has been condensed from hundreds of thousands of dollars to a 0-200% of the original approved amount, with the vast bulk of grants receiving approx 100% or less of the original amount.
+```{r}
+create_hist(grants_df_calcs, "AwardOriginal_pct")
+```
+The vast majority of grantees are getting the full amount of their award or close enough to share the histogram bin. For a better look at the minority that get a different amount from the initially approved amount, let's plot the y-axis on a log scale. 
+```{r}   
+grants_df_calcs %>% 
+  ggplot(aes(x = AwardOriginal_pct)) +   
+      geom_histogram() +
+      scale_y_log10() +
+      theme_minimal()
+```
+Zooming in on the lower-frequency values shows that the vast majority of grantees who got a different amount than the initially approved amount got less. Very few got more, and those top out at double the original amount.
+
+Is this related to match awards?
+```{r}
+grants_df_calcs %>%
+   mutate(Award_100 = case_when(
+      AwardTotal_pct == 100 ~ "Exact",
+      AwardTotal_pct < 100 ~ "Less",
+      AwardTotal_pct > 100 ~ "More"
+   ))  %>%
+   group_by(MatchReqd, Award_100) %>%
+   summarise(count = n()) %>%
+ #  arrange(desc(count)) %>%
+   ungroup()
+
+```
+This calculation shows that: <br />
+a) The large majority of awards do not require any matching funds, <br />
+b) Both match-required and outright awards can have reduced disbursement, and <br />
+c) It is much more likely to receive less than the initial allocation when the grantee is required to raise matching funds (48%)  than when they are not (18%).
+
+## Match requirements: How successful are they?
+Some grants are contingent on raising matching funds from other sources, such as individual donors, philanthropic foundations, or state or federal agencies other than the granting agency (in this case NEH).
+
+How many grants require matching funds to complete the award, and how successful are they at meeting the requirement for matching funds? Has this changed over time?
+
+```{r}
+grants_match_summary <-
+grants_df_calcs %>%
+   group_by(YearAwarded) %>%
+   summarize(across(c(MatchReqd, MatchMet), ~sum(., na.rm = T)),
+             MatchMet_pct = 100 * MatchMet / MatchReqd,
+             MatchReq_pct = 100 * sum(MatchReqd, na.rm = T)/ n()) %>%
+   ungroup()
+
+create_yearplot(grants_match_summary, "MatchReq_pct", toptitle = "Percent of Awards Requiring Match")
+
+create_yearplot(grants_match_summary, "MatchMet_pct", toptitle = "Percent of Awards Meeting Match Requirement")
+```
+The proportion of awards requiring a match generally hovers around 15% of total grants. The proportion of grantees meeting their match award amount is more variable, generally 75% but with a wide band of variation. The grants meeting their match amount falls precipitously in the most recent 5 years; these grant cycles may not be complete or the paperwork confirming fundraising may not have been completely processed yet.
+
+The intention of match fund requirements is to encourage grantees to seek additional funds. However, as noted above grantees are only successful in meeting their match amount about half of the time. Is there a pattern when they fall short of goals? 
+```{r}
+grants_df_calcs %>%
+   filter(! is.na(ApprovedMatching),
+          ! ApprovedMatching == 0) %>%
+   create_hist_log("ApprovedMatching")
+
+grants_df_calcs %>%
+   filter(! is.na(AwardMatching),
+          ! AwardMatching == 0) %>%
+   create_hist_log("AwardMatching")
+
+grants_df_calcs %>%
+   # filter by nonzero approved and remove NAs from calc; award may be 0
+   filter(! is.na(ApprovedMatching),
+          ! is.na(AwardMatching),
+          ! ApprovedMatching == 0) %>%  
+   # calculate difference between approved & raised
+   mutate(MatchDiff = ApprovedMatching - AwardMatching) %>%
+   # remove zero  & negative results to quiet log plot errors 
+   filter(!MatchDiff <= 0) %>%   
+   create_hist_log("MatchDiff")
+
+grants_df_calcs %>%
+   # filter by nonzero approved and remove NAs from calc; award may be 0
+   filter(! is.na(ApprovedMatching),
+          ! is.na(AwardMatching),
+          ! ApprovedMatching == 0) %>%  
+   # calculate percent difference between approved & raised
+   mutate(MatchDiff = ApprovedMatching - AwardMatching,
+          MatchDiff_pct = 100 * MatchDiff / ApprovedMatching) %>%
+   # remove zero & negative results to focus on shortfalls 
+   filter(!MatchDiff_pct <= 0) %>%   
+   create_hist("MatchDiff_pct")
+```
+The distribution of shortfall is distinct from the distribution of match awards. The shortfall distribution is symmetric around \$10,000 and narrower than the ApprovedMatching distribution. As a percent of the initial approved amounts, the fundraising shortfalls are bimodal with centers on  0-10% and 100% missed match. One grant had a double match provided; it is not representative and is excluded from this analysis.
+
+Are these shortfalls correlated with grant amounts?
+```{r}
+grants_df_calcs %>%
+   # filter by nonzero approved and remove NAs from calc; award may be 0
+   filter(! is.na(ApprovedMatching),
+          ! is.na(AwardMatching),
+          ! ApprovedMatching == 0) %>%  
+   # calculate percent difference between approved & raised
+   mutate(MatchDiff = ApprovedMatching - AwardMatching,
+          MatchDiff_pct = 100 * MatchDiff / ApprovedMatching) %>%
+   # remove single negative result 
+   filter(!MatchDiff_pct < 0) %>%   
+   ggplot(aes(x = ApprovedMatching,
+              y = MatchDiff_pct)) + 
+   geom_point() +
+   scale_x_log10() +
+   labs(x = "Approved Contingent Match, USD",
+         y = "Match Shortfall Percent") +
+   theme_minimal()
+```
+Shortfalls appear concentrated among grant amounts of \$5,000 to \$500,000. Grantees with smaller match requirements are somewhat more likely to raise either no matching funds or the full amount, and conversely institutional grants over \$1 million very rarely have significant fundraising shortfalls.
+
+
+## Do amounts trend by grantee or discipline properties?
+
+### Applicant Type: Organization vs Individual
+```{r}
+grants_award_typesum <-
+grants_df_calcs %>%
+   group_by(Decade) %>%
+   mutate(NTotal = length(ApplicantType),
+          AwardSum = sum(AwardTotal)) %>%
+   group_by(ApplicantType, NTotal, AwardSum, Decade) %>%
+   summarise(TypeCount = n(), TypeAwardTotal = sum(AwardTotal)) %>%
+   mutate(TypePercent = 100 * TypeCount / NTotal,
+          TypeAwardPercent = 100 * TypeAwardTotal / AwardSum) %>%
+   arrange(Decade) %>%
+   ungroup() %>%
+   select(Decade, ApplicantType, TypeCount, TypePercent, TypeAwardTotal, TypeAwardPercent) 
+
+grants_award_typesum
+```
+```{r}
+TypeAwardCols <- c("TypePercent", "TypeAwardTotal", "TypeAwardPercent")
+
+map(TypeAwardCols, ~ grants_award_typesum %>%
+   create_barplot_grouped(.x, "Decade", "ApplicantType"))
+```
+Two main observations on this data: </br>
+1. The proportion of applicant types has shifted dramatically from the 1990s to today from a roughly 1:1 ratio between organizations and individuals to a 3:1 ratio.  </br>
+2. During this period, award totals for individuals have dropped by \$20 million while organizational awards have remained stable. This inches the percent of funds disbursed to individuals from 8% per decade to 5% per decade over the life of the grant program.
+
+These observations confirm the interpretation of the histogram distribution in the initial analysis: There is a shift away from individual awards towards institutional grantees both in number of awards and amount.
+
+### Organization Type
+This table shows the top two organization types awarded grants in each decade.
+```{r}
+grants_df_calcs %>%
+   group_by(Decade) %>%
+   mutate(NTotal = length(OrganizationType),
+          AwardSum = sum(AwardTotal)) %>%
+   group_by(OrganizationType, NTotal, AwardSum, Decade) %>%
+   summarise(TypeCount = n(), TypeAwardTotal = sum(AwardTotal)) %>%
+   mutate(TypePercent = 100 * TypeCount / NTotal,
+          TypeAwardPercent = 100 * TypeAwardTotal / AwardSum) %>%
+   ungroup() %>%
+   group_by(Decade) %>%
+   slice_max(TypeCount, n = 2) %>%
+   arrange(Decade) %>%
+   ungroup() %>%
+   select(Decade, OrganizationType, TypeCount, TypePercent, TypeAwardTotal, TypeAwardPercent) 
+```
+The overwhelming majority of grants go to universities and four-year colleges. This trend is consistent over the full period of the agency's activity.
+
+For 1980s and 1990s, the Type Unknown received the largest number of awards, receiving nearly 1/4 of the grants but only 2% of funds. Based on the analysis of award number and amounts above, this points to individual awardees being the recipients of these grants.
+
+### Disciplines
+This table shows the top two organization types awarded grants in each decade.
+```{r}
+grants_df_calcs %>%
+   group_by(Decade) %>%
+   mutate(NTotal = length(PrimaryDiscipline),
+          AwardSum = sum(AwardTotal)) %>%
+   group_by(PrimaryDiscipline, NTotal, AwardSum, Decade) %>%
+   summarise(TypeCount = n(), TypeAwardTotal = sum(AwardTotal)) %>%
+   mutate(TypePercent = 100 * TypeCount / NTotal,
+          TypeAwardPercent = 100 * TypeAwardTotal / AwardSum) %>%
+   ungroup() %>%
+   group_by(Decade) %>%
+   slice_max(TypeCount, n = 2) %>%
+   arrange(Decade) %>%
+   ungroup() %>%
+   select(Decade, PrimaryDiscipline, TypeCount, TypePercent, TypeAwardTotal, TypeAwardPercent) 
+```
+The most common disciplines awarded grants are U.S. History and Interdisciplinary Studies. These comprise 20-30% of grants and 40-50% of disbursed funds.
+
+
+### Supplemenal Awards
+Relatively few grantees receive supplemental awards. However, they can be substantial as noted by a max value of \$5 million.
+```{r}
+grants_df_calcs %>%
+   group_by(Decade) %>%
+   mutate(NTotal = length(Supplements),
+          SupplementGet = case_when(
+             SupplementAmount == 0 ~ FALSE,
+             SupplementAmount > 0 ~ TRUE
+          )) %>%
+   group_by(SupplementGet, NTotal, Decade) %>%
+   summarise(TypeCount = n(), 
+             "Mean Supplement" = mean(SupplementAmount), 
+             "Median Supplement" = median(SupplementAmount),
+             "Max Supplement" = max(SupplementAmount),
+             "Min Supplement" = min(SupplementAmount)) %>%
+   mutate(TypePercent = 100 * TypeCount / NTotal) %>%
+   ungroup() %>%
+   filter(SupplementGet == TRUE) %>%
+   select(Decade, SupplementGet, TypeCount, TypePercent, "Mean Supplement", "Median Supplement","Max Supplement", "Min Supplement")  %>%
+   arrange(Decade)
+
+# associated disciplines/org types?
+```
+Supplemental awards are given to approximately 3% of grantees. Based on the count of 0 for the 1960s and 2 for the 1970s, this type of grant augmentation was probably instituted in the late 1970s or early 1980s. Since inception, the mean and median supplement have generally increased, though the median dropped slightly from the 2000s to the 2010s. The maximum supplement has consistently been \$2-5 million, and the minimum has remained at several hundred dollars. The mean and median are fairly close to one another, indicating that they are  similarly reflective of the total distribution. 
+
+```{r}
+grants_df_calcs %>%
+   mutate(SupplementGet = case_when(
+             SupplementAmount == 0 ~ FALSE,
+             SupplementAmount > 0 ~ TRUE
+          )) %>%
+   filter(SupplementGet == TRUE) %>%
+   
+   group_by(Decade) %>%
+   mutate(NTotal = length(PrimaryDiscipline),
+          AwardSum = sum(SupplementAmount)) %>%
+   group_by(PrimaryDiscipline, NTotal, AwardSum, Decade) %>%
+   summarise(TypeCount = n(), TypeAwardTotal = sum(SupplementAmount)) %>%
+   mutate(TypePercent = 100 * TypeCount / NTotal,
+          TypeAwardPercent = 100 * TypeAwardTotal / AwardSum) %>%
+   ungroup() %>%
+   group_by(Decade) %>%
+   slice_max(TypeCount, n = 2) %>%
+   arrange(Decade) %>%
+   ungroup() %>%
+   select(Decade, PrimaryDiscipline, TypeCount, TypePercent, TypeAwardTotal, TypeAwardPercent) 
+
+```
+As with the overall grant distribution, supplemental awards are granted overwhelmingly to the disciplines of U.S. History and Interdisciplinary Studies. Together, these comprise 40-80% of supplemental awards and 70-95% of disbursed supplemental funds. These numbers signify stronger representation of these fields in supplemental grants than in general awards.
+
+# Conclusions and Future Work
+This analysis concludes that NEH grant activity primarily supports work at educational and research institutions in the disciplines of U.S. History and Interdisciplinary Studies. Grant activity peaked in number of awards in the 1980s, and since that time total funding has stagnated while undergoing a shift from individual  to institutional recipients. 
+
+Awards are concentrated in number and total amount in highly populous states with many educational and cultural institutions. Grantees receiving the fewest awards and least funds tended to be US territories or foreign institutions and low-population states in the Western US.
+
+About 15% of awards require recipients to raise matching funds. While most recipients do meet their full match potential, grantees have the most difficulty fundraising the full match amount when it is between \$5,000 and \$500,000. Almost no grants of \$1+ million fell short of matching fund goals. This suggests institutional fundraising support may be critical to successfully capturing all matching funds.
+
+Supplemental awards are rare (2-3%), but can be substantial and overwhelmingly support the same primary fields as the general grant process.
+
+
+
+Future work includes adjusting the data input function to pull the latest copy of the data from the Data.gov website and incorporating the data cleaning routine into the initial load script. Some of the analysis generation could be automated into functions with additional conceptual time to correctly scale the function to flexibly fit with subsequent operations. Additional analysis will look at the full set of disciplines instead of only the Primary Discipline, relationships between Matching grant performance and grantee characteristics, and analysis of foreign grants.

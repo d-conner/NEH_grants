@@ -7,7 +7,8 @@
 read_data <- function(path) {
    df <- 
       readr::read_csv(path, 
-                      col_names = T)
+                      col_names = T,
+                      col_types = "ccccccccicccicccnnnnnncccccicicic")
                         
    return(df) 
    }
